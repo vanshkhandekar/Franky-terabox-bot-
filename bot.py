@@ -3,7 +3,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 import requests
 import re
 
-BOT_TOKEN = "YAHAN_APNA_TELEGRAM_BOT_TOKEN_DALO"
+# Tumhara token direct yaha dala hai
+BOT_TOKEN = "8269947278:AAGX87RM56PTLHABH1gbniSG3ooAoe9tbUI"
 
 # Regex to match Terabox links
 TERABOX_REGEX = re.compile(
