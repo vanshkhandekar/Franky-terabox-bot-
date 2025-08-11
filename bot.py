@@ -4,6 +4,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
+from telegram.error import BadRequest
 from datetime import datetime, timedelta
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -62,17 +63,23 @@ class User:
             self.used_today = 0
             self.last_reset = now
 
-def check_channel_membership(user_id):
-    # For demonstration, always return True
-    # In production, use Telegram API to check if user is member of CHANNEL_USERNAME
-    return True
+async def check_channel_membership(update: Update, user_id: int) -> bool:
+    try:
+        member = await update.effective_chat.get_member(user_id)
+        if member.status in ['member', 'administrator', 'creator']:
+            return True
+        else:
+            return False
+    except BadRequest:
+        # Means user is not in channel or bot can't access member info
+        return False
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
-    # Join check
-    if not check_channel_membership(user_id):
+    # Check if user joined the required channel
+    if not await check_channel_membership(update, user_id):
         await update.message.reply_text(JOIN_CHANNEL_MSG)
         return
 
