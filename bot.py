@@ -6,15 +6,23 @@ from telegram.ext import (
 from telegram.error import BadRequest
 from datetime import datetime, timedelta
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-CHANNEL_USERNAME = "@franky_intro"
+# ====== CONFIG ======
+BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"
+ADMIN_ID = 5924901610
+
+# Required channels - user must join ALL to use the bot
+REQUIRED_CHANNELS = ["@franky_intro"]  # Add more if needed
+
 OWNER_USERNAME = "@Thecyberfranky"
 
 WELCOME_MESSAGE = (
     "Welcome to Terabox_byfranky_bot! For any help, contact @Thecyberfranky."
 )
-JOIN_CHANNEL_MSG = f"Please join our channel {CHANNEL_USERNAME} to use this bot."
+JOIN_CHANNEL_MSG = (
+    "You must join our channel(s) to use this bot:\n"
+    + "\n".join(REQUIRED_CHANNELS)
+    + "\n\nPlease join and try again."
+)
 
 # Dummy user database
 users_db = {}
@@ -35,13 +43,14 @@ class User:
             self.last_reset = now
 
 async def check_channel_membership(update: Update, user_id: int) -> bool:
-    try:
-        member = await update.effective_chat.get_member(user_id)
-        if member.status in ['member', 'administrator', 'creator']:
-            return True
-        return False
-    except BadRequest:
-        return False
+    for channel in REQUIRED_CHANNELS:
+        try:
+            member = await update.bot.get_chat_member(channel, user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                return False
+        except BadRequest:
+            return False
+    return True
 
 def require_channel_join(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
