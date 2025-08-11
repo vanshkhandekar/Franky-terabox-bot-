@@ -1,17 +1,16 @@
 import os
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 )
 from telegram.error import BadRequest
 from datetime import datetime, timedelta
 
-# ====== CONFIG ======
 BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"
 ADMIN_ID = 5924901610
 
-# Required channels - user must join ALL to use the bot
-REQUIRED_CHANNELS = ["@franky_intro"]  # Add more if needed
+REQUIRED_CHANNELS = ["@franky_intro"]
+CHANNEL_INVITE_LINK = "https://t.me/franky_intro"
 
 OWNER_USERNAME = "@Thecyberfranky"
 
@@ -19,12 +18,9 @@ WELCOME_MESSAGE = (
     "Welcome to Terabox_byfranky_bot! For any help, contact @Thecyberfranky."
 )
 JOIN_CHANNEL_MSG = (
-    "You must join our channel(s) to use this bot:\n"
-    + "\n".join(REQUIRED_CHANNELS)
-    + "\n\nPlease join and try again."
+    "You must join our channel(s) to use this bot before using commands."
 )
 
-# Dummy user database
 users_db = {}
 
 class User:
@@ -52,11 +48,21 @@ async def check_channel_membership(update: Update, user_id: int) -> bool:
             return False
     return True
 
+async def send_join_channel_message(update: Update):
+    keyboard = [
+        [InlineKeyboardButton(text="Join Our Channel", url=CHANNEL_INVITE_LINK)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        JOIN_CHANNEL_MSG,
+        reply_markup=reply_markup,
+    )
+
 def require_channel_join(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not await check_channel_membership(update, user_id):
-            await update.message.reply_text(JOIN_CHANNEL_MSG)
+            await send_join_channel_message(update)
             return
         await func(update, context)
     return wrapper
