@@ -1,5 +1,6 @@
 import logging
 import re
+import json
 from datetime import datetime
 from typing import Optional
 import httpx
@@ -22,7 +23,7 @@ from telegram.error import BadRequest
 # ========================
 #  CONFIGURATION
 # ========================
-BOT_TOKEN = "8269947278:AAGX87RM56PTLHABH1gbniSG3ooAoe9tbUI"  # NEW TOKEN
+BOT_TOKEN = "8269947278:AAGX87RM56PTLHABH1gbniSG3ooAoe9tbUI"  # Your new token
 ADMIN_ID = 5924901610
 ADMIN_USERNAME = "Thecyberfranky"
 MANDATORY_CHANNEL = "franky_intro"
@@ -73,38 +74,48 @@ def join_contact_buttons():
     ])
 
 # ========================
-#  TERABOX LINK FETCHER
+#  TERABOX LINK FETCHER (HTML Scraping)
 # ========================
 async def parse_terabox_link(url: str) -> Optional[dict]:
     try:
-        m = re.search(r"/s/([A-Za-z0-9]+)", url)
-        if not m:
-            return None
-        share_code = m.group(1)
-        api_url = f"https://www.1024terabox.com/share/list?app_id=250528&shorturl={share_code}&root=1"
-
-        headers = {"User-Agent": "Mozilla/5.0", "Referer": url}
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": url
+        }
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(api_url, headers=headers)
-            if r.status_code != 200:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
                 return None
-            data = r.json()
+            html = resp.text
 
+        # Extract JSON from window.preloadList in HTML
+        match = re.search(r'window\.preloadList\s*=\s*(\{.+?\});', html)
+        if not match:
+            return None
+
+        data = json.loads(match.group(1))
         if "list" not in data or not data["list"]:
             return None
 
         file_info = data["list"][0]
+        direct_link = file_info.get("dlink")
+        if not direct_link:
+            return None
+
         return {
             "title": file_info.get("server_filename", "Terabox File"),
             "thumbnail": file_info.get("thumbs", {}).get("url3", "https://via.placeholder.com/320x180.png?text=Terabox"),
-            "direct_download": file_info.get("dlink"),
-            "stream_links_normal": [file_info["dlink"] + "&stream=low", file_info["dlink"] + "&stream=high"],
+            "direct_download": direct_link,
+            "stream_links_normal": [
+                direct_link + "&stream=low",
+                direct_link + "&stream=high"
+            ],
             "stream_links_premium": [
-                file_info["dlink"] + "&stream=low",
-                file_info["dlink"] + "&stream=med",
-                file_info["dlink"] + "&stream=high",
-                file_info["dlink"] + "&stream=ultra",
-                file_info["dlink"] + "&stream=original",
+                direct_link + "&stream=low",
+                direct_link + "&stream=med",
+                direct_link + "&stream=high",
+                direct_link + "&stream=ultra",
+                direct_link + "&stream=original",
             ]
         }
     except Exception as e:
