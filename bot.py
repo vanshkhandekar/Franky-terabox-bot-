@@ -1,11 +1,13 @@
 import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+)
 from telegram.error import BadRequest
 from datetime import datetime, timedelta
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set this in Render environment variables
-ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # Set this in Render env vars
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 CHANNEL_USERNAME = "@franky_intro"
 OWNER_USERNAME = "@Thecyberfranky"
 
@@ -41,18 +43,55 @@ async def check_channel_membership(update: Update, user_id: int) -> bool:
     except BadRequest:
         return False
 
+def require_channel_join(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not await check_channel_membership(update, user_id):
+            await update.message.reply_text(JOIN_CHANNEL_MSG)
+            return
+        await func(update, context)
+    return wrapper
+
+@require_channel_join
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
-    if not await check_channel_membership(update, user_id):
-        await update.message.reply_text(JOIN_CHANNEL_MSG)
-        return
-
     if user_id not in users_db:
         users_db[user_id] = User(user_id)
-
     await update.message.reply_text(WELCOME_MESSAGE)
 
+@require_channel_join
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "/start - Start the bot\n"
+        "/help - Show this help message\n"
+        "/time - Show current IST time\n"
+        "/subscribe - Get premium subscription info\n"
+        "/status - Check your subscription status\n"
+    )
+    await update.message.reply_text(help_text)
+
+@require_channel_join
+async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    await update.message.reply_text(f"Current IST time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+
+@require_channel_join
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"To get premium membership, please contact {OWNER_USERNAME}.\n\nSubscribe plans:\n1 Month\nLifetime"
+    )
+
+@require_channel_join
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = users_db.get(user_id)
+    if not user:
+        await update.message.reply_text("You are not registered. Send /start first.")
+        return
+    status = "Premium User" if user.is_premium else "Normal User"
+    await update.message.reply_text(f"Your status: {status}\nDaily usage: {user.used_today}/{user.daily_limit}")
+
+@require_channel_join
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sorry, I didn't understand that command.")
 
@@ -60,9 +99,13 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("time", time_command))
+    app.add_handler(CommandHandler("subscribe", subscribe_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
-    print("Bot started with polling...")
+    print("Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
