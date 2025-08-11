@@ -1,6 +1,5 @@
 import logging
 import re
-import asyncio
 from datetime import datetime
 from typing import Optional
 import httpx
@@ -30,14 +29,11 @@ MANDATORY_CHANNEL = "franky_intro"
 CHANNEL_JOIN_LINK = f"https://t.me/{MANDATORY_CHANNEL}"
 
 # ========================
-#  USER DATA STORAGE
+#  DATA STORAGE
 # ========================
-user_data = {}       # {user_id: {...}}
-referral_map = {}    # {referred_user_id: referrer_user_id}
+user_data = {}
+referral_map = {}
 
-# ========================
-#  LINK REGEX
-# ========================
 TERABOX_LINK_RE = re.compile(r"https?://(1024terabox\.com|terabox\.app|teraboxapp\.com)/s/[A-Za-z0-9]+")
 
 # ========================
@@ -51,36 +47,33 @@ logger = logging.getLogger(__name__)
 # ========================
 #  USER HANDLING
 # ========================
-def get_user_record(user_id: int) -> dict:
-    record = user_data.get(user_id)
-    if not record:
-        record = {
-            "daily_count": 0,
-            "referrals": 0,
-            "premium": False,
-            "last_reset": datetime.utcnow(),
-            "extra_chances": 0,
-        }
-        user_data[user_id] = record
+def get_user_record(uid: int) -> dict:
+    rec = user_data.get(uid)
+    if not rec:
+        rec = {"daily_count": 0, "referrals": 0, "premium": False, "last_reset": datetime.utcnow(), "extra_chances": 0}
+        user_data[uid] = rec
     else:
-        if datetime.utcnow().date() != record["last_reset"].date():
-            record["daily_count"] = 0
-            record["extra_chances"] = 0
-            record["last_reset"] = datetime.utcnow()
-    return record
+        if datetime.utcnow().date() != rec["last_reset"].date():
+            rec["daily_count"] = 0
+            rec["extra_chances"] = 0
+            rec["last_reset"] = datetime.utcnow()
+    return rec
 
-async def check_channel_membership(user_id: int, app) -> bool:
+async def check_channel_membership(uid: int, app) -> bool:
     try:
-        member = await app.bot.get_chat_member(f"@{MANDATORY_CHANNEL}", user_id)
+        member = await app.bot.get_chat_member(f"@{MANDATORY_CHANNEL}", uid)
         return member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except BadRequest:
         return False
 
-def create_join_channel_markup():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_JOIN_LINK)]])
+def join_contact_buttons():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_JOIN_LINK)],
+        [InlineKeyboardButton("📩 Contact Admin", url=f"https://t.me/{ADMIN_USERNAME}")]
+    ])
 
 # ========================
-#  TERABOX LINK FETCHER (REAL)
+#  TERABOX LINK FETCHER
 # ========================
 async def parse_terabox_link(url: str) -> Optional[dict]:
     try:
@@ -88,10 +81,9 @@ async def parse_terabox_link(url: str) -> Optional[dict]:
         if not m:
             return None
         share_code = m.group(1)
-
         api_url = f"https://www.1024terabox.com/share/list?app_id=250528&shorturl={share_code}&root=1"
-        headers = {"User-Agent": "Mozilla/5.0", "Referer": url}
 
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": url}
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.get(api_url, headers=headers)
             if r.status_code != 200:
@@ -102,28 +94,18 @@ async def parse_terabox_link(url: str) -> Optional[dict]:
             return None
 
         file_info = data["list"][0]
-        file_name = file_info.get("server_filename", "Terabox File")
-        thumbnail = file_info.get("thumbs", {}).get("url3", "https://via.placeholder.com/320x180.png?text=Terabox")
-        direct_link = file_info.get("dlink")
-
-        if not direct_link:
-            return None
-
-        stream_links_normal = [direct_link + "&stream=low", direct_link + "&stream=high"]
-        stream_links_premium = [
-            direct_link + "&stream=low",
-            direct_link + "&stream=med",
-            direct_link + "&stream=high",
-            direct_link + "&stream=ultra",
-            direct_link + "&stream=original",
-        ]
-
         return {
-            "title": file_name,
-            "thumbnail": thumbnail,
-            "direct_download": direct_link,
-            "stream_links_normal": stream_links_normal,
-            "stream_links_premium": stream_links_premium
+            "title": file_info.get("server_filename", "Terabox File"),
+            "thumbnail": file_info.get("thumbs", {}).get("url3", "https://via.placeholder.com/320x180.png?text=Terabox"),
+            "direct_download": file_info.get("dlink"),
+            "stream_links_normal": [file_info["dlink"] + "&stream=low", file_info["dlink"] + "&stream=high"],
+            "stream_links_premium": [
+                file_info["dlink"] + "&stream=low",
+                file_info["dlink"] + "&stream=med",
+                file_info["dlink"] + "&stream=high",
+                file_info["dlink"] + "&stream=ultra",
+                file_info["dlink"] + "&stream=original",
+            ]
         }
     except Exception as e:
         logger.error(f"Terabox parse error: {e}")
@@ -135,108 +117,122 @@ async def parse_terabox_link(url: str) -> Optional[dict]:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not await check_channel_membership(user.id, context.application):
-        await update.message.reply_text(f"❗ Join @{MANDATORY_CHANNEL} first.", reply_markup=create_join_channel_markup())
+        await update.message.reply_text("❗ Please join our channel first to use the bot.", reply_markup=join_contact_buttons())
         return
-    await update.message.reply_text(f"Welcome to Terabox_byfranky_bot! For help, contact @{ADMIN_USERNAME}.")
+    await update.message.reply_text(
+        f"👋 Hello {user.first_name}!\n\n"
+        "🎉 Welcome to <b>Terabox_byfranky_bot</b> 🚀\n\n"
+        "📌 I can fetch videos, files, and streaming links from Terabox for you.\n"
+        "💎 Premium users enjoy unlimited access & bulk link processing.\n\n"
+        f"For help or premium, contact @{ADMIN_USERNAME}.\n"
+        f"Don't forget to join our updates channel 📢",
+        parse_mode="HTML",
+        reply_markup=join_contact_buttons()
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_channel_membership(update.effective_user.id, context.application):
-        await update.message.reply_text(f"❗ Join @{MANDATORY_CHANNEL} first.", reply_markup=create_join_channel_markup())
+        await update.message.reply_text("❗ Join our channel to use the bot.", reply_markup=join_contact_buttons())
         return
     await update.message.reply_text(
-        "/start - Start bot\n"
-        "/help - Show help\n"
-        "/subscribe - Premium plans\n"
-        "/status - Check usage\n"
-        "/refer <user_id> - Refer friends\n"
-        "/approve <uid> - Make premium (Admin)\n"
-        "/remove <uid> - Remove premium (Admin)"
+        "📜 <b>Commands:</b>\n\n"
+        "/start - Start bot 💡\n"
+        "/help - Show help 📖\n"
+        "/subscribe - Premium plans 💎\n"
+        "/status - Check your usage 📊\n"
+        "/refer <user_id> - Refer and earn extra chances 🤝\n\n"
+        "👑 <b>Admin Only:</b>\n"
+        "/approve <uid> - Make premium\n"
+        "/remove <uid> - Remove premium",
+        parse_mode="HTML"
     )
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_channel_membership(update.effective_user.id, context.application):
-        await update.message.reply_text(f"❗ Join @{MANDATORY_CHANNEL} first.", reply_markup=create_join_channel_markup())
+        await update.message.reply_text("❗ Join our channel to use the bot.", reply_markup=join_contact_buttons())
         return
-    await update.message.reply_text(f"Free: 10 links/day\nPremium: Unlimited + bulk\nContact @{ADMIN_USERNAME}")
+    await update.message.reply_text(
+        "💎 <b>Subscription Plans:</b>\n\n"
+        "Free: 10 Terabox links/day + referrals\n"
+        "Premium: Unlimited use + bulk processing\n\n"
+        f"📩 Contact @{ADMIN_USERNAME} for premium.",
+        parse_mode="HTML",
+        reply_markup=join_contact_buttons()
+    )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_channel_membership(update.effective_user.id, context.application):
-        await update.message.reply_text(f"❗ Join @{MANDATORY_CHANNEL} first.", reply_markup=create_join_channel_markup())
+        await update.message.reply_text("❗ Join our channel to use the bot.", reply_markup=join_contact_buttons())
         return
     rec = get_user_record(update.effective_user.id)
     limit = "Unlimited" if rec["premium"] else 10 + rec["extra_chances"]
     await update.message.reply_text(
-        f"User: {update.effective_user.id}\nPremium: {rec['premium']}\nDaily: {rec['daily_count']}/{limit}\nReferrals: {rec['referrals']}"
+        f"👤 <b>User:</b> {update.effective_user.id}\n"
+        f"💎 <b>Premium:</b> {'✅' if rec['premium'] else '❌'}\n"
+        f"📊 <b>Daily:</b> {rec['daily_count']}/{limit}\n"
+        f"🤝 <b>Referrals:</b> {rec['referrals']}",
+        parse_mode="HTML"
     )
 
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
+    if update.effective_user.id != ADMIN_ID: return
     try:
         uid = int(context.args[0])
     except:
-        await update.message.reply_text("Usage: /approve <user_id>")
-        return
+        await update.message.reply_text("Usage: /approve <user_id>"); return
     get_user_record(uid)["premium"] = True
-    await update.message.reply_text(f"User {uid} is now Premium ✅")
+    await update.message.reply_text(f"✅ User {uid} Premium Added.")
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
+    if update.effective_user.id != ADMIN_ID: return
     try:
         uid = int(context.args[0])
     except:
-        await update.message.reply_text("Usage: /remove <user_id>")
-        return
+        await update.message.reply_text("Usage: /remove <user_id>"); return
     get_user_record(uid)["premium"] = False
-    await update.message.reply_text(f"User {uid} Premium Removed ❌")
+    await update.message.reply_text(f"❌ User {uid} Premium Removed.")
 
 async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_channel_membership(update.effective_user.id, context.application):
-        await update.message.reply_text(f"❗ Join @{MANDATORY_CHANNEL} first.", reply_markup=create_join_channel_markup())
+        await update.message.reply_text("❗ Join channel first.", reply_markup=join_contact_buttons())
         return
     try:
-        referred_id = int(context.args[0])
+        rid = int(context.args[0])
     except:
-        await update.message.reply_text("Usage: /refer <user_id>")
-        return
-    if referred_id == update.effective_user.id:
-        await update.message.reply_text("❌ Cannot refer yourself")
-        return
-    if referred_id in referral_map:
-        await update.message.reply_text("❌ Already referred")
-        return
-    referral_map[referred_id] = update.effective_user.id
+        await update.message.reply_text("Usage: /refer <user_id>"); return
+    if rid == update.effective_user.id:
+        await update.message.reply_text("❌ Cannot refer yourself."); return
+    if rid in referral_map:
+        await update.message.reply_text("❌ Already referred."); return
+    referral_map[rid] = update.effective_user.id
     rec = get_user_record(update.effective_user.id)
     rec["referrals"] += 1
     rec["extra_chances"] += 1
-    await update.message.reply_text(f"✅ Referral added. +1 daily chance.")
+    await update.message.reply_text("✅ Referral Added. +1 Daily Chance.")
 
 # ========================
-#  TERABOX LINK HANDLER
+#  TERABOX HANDLER
 # ========================
 async def process_terabox_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_channel_membership(update.effective_user.id, context.application):
-        await update.message.reply_text(f"❗ Join @{MANDATORY_CHANNEL} first.", reply_markup=create_join_channel_markup())
+        await update.message.reply_text("❗ Join channel first.", reply_markup=join_contact_buttons())
         return
     matches = list(TERABOX_LINK_RE.finditer(update.message.text or ""))
     if not matches:
-        await update.message.reply_text("❌ No valid Terabox link found.")
-        return
+        await update.message.reply_text("❌ No valid Terabox link found."); return
 
     rec = get_user_record(update.effective_user.id)
     for m in matches:
         info = await parse_terabox_link(m.group(0))
         if not info:
-            await update.message.reply_text("⚠️ Failed to fetch link data.")
-            continue
+            await update.message.reply_text("⚠️ Unable to fetch file details."); continue
 
         links = info["stream_links_premium"] if rec["premium"] else info["stream_links_normal"]
-        caption = f"🎬 {info['title']}\n📥 Direct Download: {info['direct_download']}\n\n▶️ Streaming Links:\n"
+        caption = f"🎬 <b>{info['title']}</b>\n📥 <b>Direct Download:</b> {info['direct_download']}\n\n▶️ <b>Streaming Links:</b>\n"
         for i, l in enumerate(links):
             caption += f"{i+1}. {l}\n"
 
-        await update.message.reply_photo(info["thumbnail"], caption=caption)
+        await update.message.reply_photo(info["thumbnail"], caption=caption, parse_mode="HTML", reply_markup=join_contact_buttons())
         rec["daily_count"] += 1
 
 # ========================
@@ -248,7 +244,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⚠️ Error occurred")
 
 # ========================
-#  MAIN
+#  MAIN FUNCTION
 # ========================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
