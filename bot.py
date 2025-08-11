@@ -1,5 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta
+import requests
+from bs4 import BeautifulSoup
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
@@ -8,13 +10,14 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
-# ===== CONFIG =====
-BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"
-ADMIN_ID = 5924901610
-OWNER_USERNAME = "@Thecyberfranky"
-CHANNELS = ["@franky_intro"]
-CHANNEL_INVITE_LINK = "https://t.me/franky_intro"
+# ===== CONFIGURATION =====
+BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"   # Tera bot token
+ADMIN_ID = 5924901610                                           # Tera telegram user id (admin)
+OWNER_USERNAME = "@Thecyberfranky"                             # Tera username
+MANDATORY_CHANNELS = ["@franky_intro"]                         # Jo channel join mandatory hai
+CHANNEL_INVITE_LINK = "https://t.me/franky_intro"              # Channel invite link
 
+# ===== MESSAGES =====
 WELCOME_MSG = (
     "Welcome to Terabox_byfranky_bot!\n\n"
     f"For any help, contact {OWNER_USERNAME}."
@@ -61,10 +64,10 @@ class User:
         if not self.is_premium:
             self.daily_limit += 1
 
-# ===== HELPERS =====
+# ===== HELPER FUNCTIONS =====
 
 async def check_channel_membership(update: Update, user_id: int) -> bool:
-    for channel in CHANNELS:
+    for channel in MANDATORY_CHANNELS:
         try:
             member = await update.bot.get_chat_member(channel, user_id)
             if member.status not in ['member', 'administrator', 'creator']:
@@ -96,7 +99,40 @@ async def auto_delete_message(message, delay_seconds=1800):
     except:
         pass
 
-# ===== COMMANDS =====
+# ===== Terabox scraping function =====
+
+def fetch_terabox_file_info(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        title = soup.find("title").text if soup.find("title") else "Terabox File"
+
+        thumbnail = None
+        meta_img = soup.find("meta", property="og:image")
+        if meta_img:
+            thumbnail = meta_img.get("content")
+
+        download_link = url  # Simplified direct link fallback
+        streaming_links = [url + f"/stream{i}" for i in range(1, 6)]  # Dummy streaming links
+
+        return {
+            "title": title,
+            "thumbnail": thumbnail,
+            "download_link": download_link,
+            "streaming_links": streaming_links
+        }
+    except Exception as e:
+        print("Error fetching terabox info:", e)
+        return None
+
+# ===== COMMAND HANDLERS =====
 
 @require_channel_join
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -238,7 +274,7 @@ async def handle_terabox_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     user.add_use()
 
-    links = [word for word in update.message.text.split() if "terabox.com" in word]
+    links = [word for word in update.message.text.split() if "terabox.com" in word or "1024terabox.com" in word]
     if not links:
         await update.message.reply_text("No valid terabox link found.")
         return
@@ -248,28 +284,33 @@ async def handle_terabox_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     for link in links:
-        # Placeholder thumbnail image
-        thumbnail = "https://telegra.ph/file/8f7e1b9a6d2a61867c9f0.jpg"
+        info = fetch_terabox_file_info(link)
+        if not info:
+            await update.message.reply_text(f"Could not fetch info for link: {link}")
+            continue
 
-        direct_link = link + "/direct"
-        streaming_links = []
-        if user.is_premium:
-            streaming_links = [f"{link}/stream{i}" for i in range(1, 6)]
+        title = info.get("title", "Terabox File")
+        thumbnail = info.get("thumbnail")
+        download_link = info.get("download_link")
+        streaming_links = info.get("streaming_links", [])
+
+        if not user.is_premium:
+            streaming_links = streaming_links[:2]
         else:
-            streaming_links = [f"{link}/stream1", f"{link}/stream2"]
+            streaming_links = streaming_links[:5]
 
-        text = f"🎥 Terabox File\nLink: {link}\n\nDownload or stream from below:\n"
-        text += f"• Direct Download: {direct_link}\n"
+        text = f"🎥 {title}\n\nDownload or stream from below:\n"
+        text += f"• Direct Download: {download_link}\n"
         for i, s_link in enumerate(streaming_links, 1):
             text += f"• Stream {i}: {s_link}\n"
 
-        buttons = [[InlineKeyboardButton("Download", url=direct_link)]]
+        buttons = [[InlineKeyboardButton("Download", url=download_link)]]
         for i, s_link in enumerate(streaming_links, 1):
             buttons.append([InlineKeyboardButton(f"Stream {i}", url=s_link)])
         keyboard = InlineKeyboardMarkup(buttons)
 
         sent = await update.message.reply_photo(
-            photo=thumbnail,
+            photo=thumbnail or "https://telegra.ph/file/8f7e1b9a6d2a61867c9f0.jpg",
             caption=text,
             reply_markup=keyboard,
         )
@@ -282,7 +323,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete_message(update.message))
     asyncio.create_task(auto_delete_message(sent))
 
-# ===== RUN BOT =====
+# ===== MAIN =====
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -295,7 +336,7 @@ def main():
     app.add_handler(CommandHandler("remove", remove_command))
     app.add_handler(CommandHandler("announce", announce_command))
     app.add_handler(CommandHandler("refer", refer_command))
-    app.add_handler(MessageHandler(filters.Regex(r".*(terabox\.com).*"), handle_terabox_link))
+    app.add_handler(MessageHandler(filters.Regex(r".*(terabox\.com|1024terabox\.com).*"), handle_terabox_link))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
     print("Bot is running...")
