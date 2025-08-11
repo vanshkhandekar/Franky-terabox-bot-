@@ -1,4 +1,1 @@
-flask
-python-telegram-bot==20.3
-requests
-beautifulsoup4
+python-telegram-bot>=20.0
