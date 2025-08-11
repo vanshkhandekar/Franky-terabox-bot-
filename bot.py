@@ -1,16 +1,11 @@
 # main.py
 """
-Terabox_byfranky_bot - single-file bot
-Features included:
-- Normal users: single link at a time, daily limit (10)
-- Premium users: bulk links (up to 10 bulk links), unlimited daily (daily_quota = -1)
-- Invite system: share invite => referrer +1 daily quota
-- Payment button: sends local QR image + UPI ID + professional message (English)
-- Admin commands: /status, /approve <user_id>, /remove <user_id>
-- Auto-delete user message & bot reply after 30 minutes
-- Channel membership required to use bot (checks @franky_intro)
-- Logging to DB + daily report to admin
-- All DB stored in Neon PostgreSQL (asyncpg)
+Terabox bot — full features + admin-settable payment (QR + UPI).
+Admin workflow:
+ - /setpayment <upi>         -> sets UPI text in DB (admin only)
+ - (send photo with caption) /setpayment_photo -> admin sends QR photo, bot stores bytes in DB
+User workflow:
+ - /pay  -> shows Payment button -> opens stored QR + UPI + professional instruction
 """
 
 import asyncio
@@ -20,13 +15,11 @@ from io import BytesIO
 import os
 
 import asyncpg
-import qrcode
-from PIL import Image
-
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
+    InputFile,
 )
 from telegram.ext import (
     Application,
@@ -34,6 +27,430 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
+    filters,
+)
+
+# ---------------- CONFIG (prefilled) ----------------
+BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"
+ADMIN_ID = 5924901610
+BOT_USERNAME = "Terabox_byfranky_bot"
+CONTACT_USERNAME = "Thecyberfranky"
+CHANNEL_USERNAME = "franky_intro"
+
+DATABASE_URL = (
+    "postgresql://neondb_owner:"
+    "npg_SgH8G4BDbvui@ep-square-cloud-a1t2wxt9-pooler."
+    "ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+)
+AUTO_DELETE_SECONDS = 1800
+BULK_LIMIT_COUNT = 10
+# ---------------------------------------------------
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("terabox-payment")
+
+# DB pool placeholder
+db_pool: asyncpg.pool.Pool = None
+
+CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+    user_id BIGINT PRIMARY KEY,
+    username TEXT,
+    is_premium BOOLEAN DEFAULT FALSE,
+    premium_until TIMESTAMP NULL,
+    daily_quota INTEGER DEFAULT 10,
+    daily_used INTEGER DEFAULT 0,
+    referrals INTEGER DEFAULT 0,
+    registered_on TIMESTAMP DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS links (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
+    link TEXT,
+    uploaded_on TIMESTAMP DEFAULT now(),
+    expiry_ts TIMESTAMP NULL
+);
+CREATE TABLE IF NOT EXISTS invites (
+    id SERIAL PRIMARY KEY,
+    referrer BIGINT,
+    referee BIGINT,
+    created_on TIMESTAMP DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS logs (
+    id SERIAL PRIMARY KEY,
+    level TEXT,
+    message TEXT,
+    created_on TIMESTAMP DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    upi TEXT,
+    qr BYTEA,
+    qr_mime TEXT,
+    updated_on TIMESTAMP DEFAULT now()
+);
+"""
+
+# ---------------- DB helpers ----------------
+async def init_db():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    async with db_pool.acquire() as conn:
+        await conn.execute(CREATE_SQL)
+    logger.info("DB ready")
+
+async def db_log(level: str, message: str):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO logs (level, message) VALUES ($1, $2)", level, message)
+    except Exception as e:
+        logger.exception("db_log error: %s", e)
+
+async def ensure_user(user_id: int, username: str = ""):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
+            user_id, username or ""
+        )
+
+# ---------------- Utilities ----------------
+def caption_text():
+    return f"Thanks for using @{BOT_USERNAME} | Contact @{CONTACT_USERNAME}"
+
+async def is_member_of_channel(bot, user_id: int) -> bool:
+    if not CHANNEL_USERNAME:
+        return True
+    try:
+        m = await bot.get_chat_member(chat_id=f"@{CHANNEL_USERNAME}", user_id=user_id)
+        return m.status in ("member", "administrator", "creator")
+    except Exception as e:
+        logger.info("channel check failed: %s", e)
+        return False
+
+# ---------------- Payment admin commands ----------------
+async def setpayment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /setpayment <upi>  (admin only)
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /setpayment <UPI_ID>\nExample: /setpayment yourupi@upi")
+        return
+    upi = context.args[0].strip()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO payments (id, upi, updated_on) VALUES (1, $1, now()) "
+            "ON CONFLICT (id) DO UPDATE SET upi = $1, updated_on = now()", upi
+        )
+    await update.message.reply_text(f"UPI set to `{upi}`", parse_mode="Markdown")
+    await db_log("INFO", f"Admin set UPI to {upi}")
+
+async def setpayment_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin sends photo with caption "/setpayment_photo" (exact)
+    if update.effective_user.id != ADMIN_ID:
+        return
+    # Accept photo messages where caption startswith /setpayment_photo
+    caption = (update.message.caption or "").strip()
+    if not caption.startswith("/setpayment_photo"):
+        return
+    photos = update.message.photo
+    if not photos:
+        await update.message.reply_text("No photo found in the message.")
+        return
+    # highest resolution photo is last
+    file_id = photos[-1].file_id
+    try:
+        file = await context.bot.get_file(file_id)
+        bio = BytesIO()
+        await file.download(out=bio)
+        bio.seek(0)
+        data = bio.read()
+        mime = "image/jpeg"  # Telegram usually gives jpeg for photos
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO payments (id, qr, qr_mime, updated_on) VALUES (1, $1, $2, now()) "
+                "ON CONFLICT (id) DO UPDATE SET qr = $1, qr_mime = $2, updated_on = now()", data, mime
+            )
+        await update.message.reply_text("Payment QR image saved successfully.")
+        await db_log("INFO", f"Admin uploaded payment QR ({len(data)} bytes)")
+    except Exception as e:
+        await update.message.reply_text(f"Failed to save QR: {e}")
+        logger.exception("save qr failed")
+
+async def showpayment_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin preview of stored payment
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT upi, qr, qr_mime FROM payments WHERE id = 1")
+    if not row:
+        await update.message.reply_text("No payment info set.")
+        return
+    upi, qr, qr_mime = row["upi"], row["qr"], row["qr_mime"]
+    text = f"UPI: `{upi}`" if upi else "UPI: (not set)"
+    if qr:
+        bio = BytesIO(qr)
+        bio.seek(0)
+        await update.message.reply_photo(photo=bio, caption=text, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+# ---------------- Payment user flow ----------------
+async def pay_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [[InlineKeyboardButton("💳 Payment", callback_data="payment_main")]]
+    await update.message.reply_text("Choose an option:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # show options
+    kb = [
+        [InlineKeyboardButton("Open seller profile", url=f"https://t.me/{CONTACT_USERNAME}")],
+        [InlineKeyboardButton("Show UPI & QR", callback_data="payment_show")]
+    ]
+    await q.message.reply_text("Select a payment option:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def payment_show_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # fetch payment info
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT upi, qr, qr_mime FROM payments WHERE id = 1")
+    upi = row["upi"] if row else None
+    qr = row["qr"] if row else None
+    message = (
+        "💳 *Payment Instructions*\n\n"
+        f"UPI ID: `{upi}`\n\n" if upi else "💳 *Payment Instructions*\n\n(UPI ID not set)\n\n"
+    )
+    message += (
+        "Please make the payment and then send the payment screenshot to "
+        f"@{CONTACT_USERNAME} for manual verification. Once verified, your premium will be activated.\n\n"
+        "If you experience any issues, contact the seller directly."
+    )
+    if qr:
+        bio = BytesIO(qr)
+        bio.seek(0)
+        try:
+            await q.message.reply_photo(photo=bio, caption=message, parse_mode="Markdown")
+        except Exception:
+            # fallback to text-only
+            await q.message.reply_text(message, parse_mode="Markdown")
+    else:
+        # no saved QR — fallback to UPI-only text
+        await q.message.reply_text(message, parse_mode="Markdown")
+    await db_log("INFO", f"Payment info shown to {q.from_user.id}")
+
+# ----------------- Other core handlers (minimal, keep features) ----------------
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await ensure_user(user.id, user.username or "")
+    text = (
+        f"👋 Hello {user.first_name}!\n\n"
+        "Welcome to *Terabox by Franky* — features (quick):\n"
+        "1️⃣ Single upload / 10 links daily for normal users\n"
+        "2️⃣ Premium: bulk uploads + streaming mirrors\n"
+        "3️⃣ Invite friends → +1 daily quota each\n"
+        "4️⃣ Auto-delete after 30 mins & payment support\n\n"
+        "Type /help to see commands."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+    await db_log("INFO", f"/start by {user.id}")
+
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📋 *Commands*\n"
+        "/start - Welcome\n"
+        "/help - This menu\n"
+        "/invite - Invite link\n"
+        "/pay - Payment options\n"
+        "/check - Check your premium status\n\n"
+        "Admin only: /setpayment, /showpayment, /setpayment_photo (send photo with caption)\n"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+async def invite_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await ensure_user(user.id, user.username or "")
+    payload = f"ref_{user.id}"
+    bot_link = f"https://t.me/{BOT_USERNAME}?start={payload}"
+    await update.message.reply_text(f"Share this invite link:\n{bot_link}\nYou get +1 daily quota per valid referral.")
+    await db_log("INFO", f"Invite sent to {user.id}")
+
+# Minimal /check command
+async def check_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT is_premium, premium_until, daily_quota, daily_used FROM users WHERE user_id = $1", user.id)
+    if not row:
+        await update.message.reply_text("No record found. Send /start to register.")
+        return
+    is_prem, until, quota, used = row["is_premium"], row["premium_until"], row["daily_quota"], row["daily_used"]
+    text = (
+        f"Premium: {is_prem}\n"
+        f"Premium until: {until}\n"
+        f"Daily quota: {'unlimited' if quota == -1 else quota}\n"
+        f"Used today: {used}"
+    )
+    await update.message.reply_text(text)
+
+# ----------------- Message handlers for links (kept simple) -----------------
+async def schedule_delete_job(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    try:
+        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["message_id"])
+    except Exception:
+        pass
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user = update.effective_user
+    if not (text.startswith("http") or text.startswith("www") or text.startswith("magnet:")):
+        return
+    await ensure_user(user.id, user.username or "")
+
+    # channel check
+    ok = await is_member_of_channel(context.bot, user.id)
+    if not ok:
+        await update.message.reply_text(f"Please join @{CHANNEL_USERNAME} to use this bot.")
+        return
+
+    # support bulk links
+    links = [line.strip() for line in text.splitlines() if line.strip()]
+    is_bulk = len(links) > 1
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT daily_quota, daily_used, is_premium FROM users WHERE user_id = $1", user.id)
+        if not row:
+            await update.message.reply_text("Error retrieving user data.")
+            return
+        daily_quota, daily_used, is_premium = row["daily_quota"], row["daily_used"], row["is_premium"]
+
+        if is_bulk and not is_premium:
+            await update.message.reply_text("Bulk uploads are for premium users only.")
+            return
+        if is_bulk and is_premium and len(links) > BULK_LIMIT_COUNT:
+            await update.message.reply_text(f"Bulk limit is {BULK_LIMIT_COUNT} links per message.")
+            return
+        inc = len(links)
+        if daily_quota != -1 and (daily_used + inc) > daily_quota:
+            await update.message.reply_text("This will exceed your daily quota. Reduce links or get premium.")
+            return
+
+        stored_ids = []
+        for lnk in links:
+            rec = await conn.fetchrow("INSERT INTO links (user_id, link) VALUES ($1, $2) RETURNING id", user.id, lnk)
+            stored_ids.append(rec["id"])
+        await conn.execute("UPDATE users SET daily_used = daily_used + $1 WHERE user_id = $2", inc, user.id)
+
+    # reply with simulated terabox links
+    replies = []
+    for i, l in enumerate(links):
+        fname = l.split("/")[-1][:128] if "/" in l else l[:128]
+        tlink = f"https://terabox.fake/d/{stored_ids[i]}"
+        replies.append(f"{fname}\n{tlink}\n")
+    reply_text = "\n".join(replies) + f"\n{caption_text()}"
+    sent = await update.message.reply_text(reply_text)
+    context.job_queue.run_once(schedule_delete_job, when=timedelta(seconds=AUTO_DELETE_SECONDS),
+                               data={"chat_id": update.message.chat_id, "message_id": update.message.message_id})
+    context.job_queue.run_once(schedule_delete_job, when=timedelta(seconds=AUTO_DELETE_SECONDS),
+                               data={"chat_id": sent.chat_id, "message_id": sent.message_id})
+    await db_log("INFO", f"User {user.id} added {len(links)} link(s)")
+
+# ----------------- Admin approve/remove/status -----------------
+async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM users")
+        premium = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_premium = TRUE")
+        links24 = await conn.fetchval("SELECT COUNT(*) FROM links WHERE uploaded_on >= now() - interval '1 day'")
+    await update.message.reply_text(f"Total users: {total}\nPremium: {premium}\nLinks last 24h: {links24}")
+
+async def approve_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /approve <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+    except:
+        await update.message.reply_text("User id must be integer.")
+        return
+    until = datetime.utcnow() + timedelta(days=365)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_premium = TRUE, premium_until = $1, daily_quota = -1 WHERE user_id = $2", until, uid)
+    await update.message.reply_text(f"User {uid} approved as premium until {until.isoformat()}")
+
+async def remove_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /remove <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+    except:
+        await update.message.reply_text("User id must be integer.")
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_premium = FALSE, premium_until = NULL, daily_quota = 10 WHERE user_id = $1", uid)
+    await update.message.reply_text(f"User {uid} removed from premium.")
+
+# ----------------- Daily reset -----------------
+async def daily_reset(context: ContextTypes.DEFAULT_TYPE):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET daily_used = 0")
+        total = await conn.fetchval("SELECT COUNT(*) FROM users")
+        premium = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_premium = TRUE")
+        links24 = await conn.fetchval("SELECT COUNT(*) FROM links WHERE uploaded_on >= now() - interval '1 day'")
+    report = f"Daily report:\nUsers: {total}\nPremium: {premium}\nLinks last 24h: {links24}"
+    try:
+        await context.bot.send_message(ADMIN_ID, report)
+    except Exception:
+        pass
+    await db_log("INFO", "Daily reset")
+
+# ----------------- Startup -----------------
+async def main():
+    await init_db()
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # register handlers
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("help", help_handler))
+    app.add_handler(CommandHandler("invite", invite_handler))
+    app.add_handler(CommandHandler("pay", pay_handler))
+    app.add_handler(CallbackQueryHandler(payment_callback, pattern="^payment_main$"))
+    app.add_handler(CallbackQueryHandler(payment_show_callback, pattern="^payment_show$"))
+    app.add_handler(CommandHandler("setpayment", setpayment_handler))
+    app.add_handler(CommandHandler("showpayment", showpayment_admin))
+    # photo caption handler for admin to upload QR
+    app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/setpayment_photo"), setpayment_photo_handler))
+    app.add_handler(CommandHandler("status", status_handler))
+    app.add_handler(CommandHandler("approve", approve_handler))
+    app.add_handler(CommandHandler("remove", remove_handler))
+    app.add_handler(CommandHandler("check", check_handler))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_message))
+
+    # daily reset job at next UTC midnight
+    now = datetime.utcnow()
+    next_midnight = datetime(now.year, now.month, now.day) + timedelta(days=1)
+    first = (next_midnight - now).total_seconds()
+    app.job_queue.run_repeating(daily_reset, interval=24*3600, first=first)
+
+    logger.info("Starting bot (polling)...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.wait_until_finished()
+
+if __name__ == "__main__":
+    asyncio.run(main())
     filters,
 )
 
