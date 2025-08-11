@@ -3,7 +3,9 @@ import re
 import json
 from datetime import datetime
 from typing import Optional
-import httpx
+import asyncio
+from playwright.async_api import async_playwright
+
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 )
@@ -15,7 +17,7 @@ from telegram.error import BadRequest
 # ========================
 # CONFIG
 # ========================
-BOT_TOKEN = "8269947278:AAGX87RM56PTLHABH1gbniSG3ooAoe9tbUI"  # token
+BOT_TOKEN = "8269947278:AAGX87RM56PTLHABH1gbniSG3ooAoe9tbUI"
 ADMIN_ID = 5924901610
 ADMIN_USERNAME = "Thecyberfranky"
 MANDATORY_CHANNEL = "franky_intro"
@@ -27,7 +29,7 @@ CHANNEL_JOIN_LINK = f"https://t.me/{MANDATORY_CHANNEL}"
 user_data = {}
 referral_map = {}
 
-# ==== ALL TERABOX LINK DOMAINS SUPPORTED ====
+# All known Terabox domains
 TERABOX_LINK_RE = re.compile(
     r"https?://("
     r"1024terabox\.com|terabox\.app|teraboxapp\.com|"
@@ -37,28 +39,24 @@ TERABOX_LINK_RE = re.compile(
     r")/s/[A-Za-z0-9_-]+"
 )
 
-# ========================
-# LOGGING
-# ========================
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========================
-# UTILS
+# HELPERS
 # ========================
-def get_user_record(uid: int) -> dict:
+def get_user_record(uid: int):
     rec = user_data.get(uid)
     if not rec:
         rec = {"daily_count": 0, "referrals": 0, "premium": False, "last_reset": datetime.utcnow(), "extra_chances": 0}
         user_data[uid] = rec
-    else:
-        if datetime.utcnow().date() != rec["last_reset"].date():
-            rec["daily_count"] = 0
-            rec["extra_chances"] = 0
-            rec["last_reset"] = datetime.utcnow()
+    elif datetime.utcnow().date() != rec["last_reset"].date():
+        rec["daily_count"] = 0
+        rec["extra_chances"] = 0
+        rec["last_reset"] = datetime.utcnow()
     return rec
 
-async def check_channel_membership(uid: int, app) -> bool:
+async def check_channel_membership(uid: int, app):
     try:
         member = await app.bot.get_chat_member(f"@{MANDATORY_CHANNEL}", uid)
         return member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
@@ -72,29 +70,23 @@ def join_contact_buttons():
     ])
 
 # ========================
-# UNIVERSAL LINK PARSER
+# PLAYWRIGHT TERABOX FETCHER
 # ========================
 async def parse_terabox_link(url: str) -> Optional[dict]:
     try:
-        headers = {"User-Agent": "Mozilla/5.0", "Referer": url}
-        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                logger.error(f"HTTP error {resp.status_code}")
-                return None
-            html = resp.text
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(url, wait_until="networkidle", timeout=60000)
 
-        # Regex to get window.preloadList even if it has spaces or newlines
-        match = re.search(r'window\.preloadList\s*=\s*(\{.*?\});', html, re.S)
-        if not match:
-            logger.error("No preloadList found in HTML for this link")
+            # Try multiple variable names
+            preload = await page.evaluate("""() => window.preloadList || window.__PRELOADED_STATE__ || null""")
+            await browser.close()
+
+        if not preload or "list" not in preload or not preload["list"]:
             return None
 
-        data = json.loads(match.group(1))
-        if "list" not in data or not data["list"]:
-            return None
-
-        file_info = data["list"][0]
+        file_info = preload["list"][0]
         direct_link = file_info.get("dlink")
         if not direct_link:
             return None
@@ -113,7 +105,7 @@ async def parse_terabox_link(url: str) -> Optional[dict]:
             ],
         }
     except Exception as e:
-        logger.error(f"Parse error: {e}")
+        logger.error(f"Playwright error: {e}")
         return None
 
 # ========================
@@ -121,59 +113,40 @@ async def parse_terabox_link(url: str) -> Optional[dict]:
 # ========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_channel_membership(update.effective_user.id, context.application):
-        await update.message.reply_text("❗ Please join channel first.", reply_markup=join_contact_buttons())
+        await update.message.reply_text("❗ Please join our channel first.", reply_markup=join_contact_buttons())
         return
     await update.message.reply_text(
-        f"👋 Hello {update.effective_user.first_name}!\n\n"
-        "🎉 Welcome to <b>Terabox Downloader Bot</b>\n"
-        "📌 Send a Terabox link (any domain) & get direct + streaming links.\n"
-        "💎 Premium = Unlimited\n\n"
-        f"Contact @{ADMIN_USERNAME} for help/premium.",
+        f"👋 Hello {update.effective_user.first_name}!\n"
+        "🎉 Welcome to Terabox Downloader Bot (Full Browser Mode) 🚀\n"
+        "📌 Send any Terabox link & get real file details + direct links.\n"
+        "💎 Premium = Unlimited use\n"
+        f"📩 Contact @{ADMIN_USERNAME} for premium",
         parse_mode="HTML",
         reply_markup=join_contact_buttons()
     )
 
-async def help_command(update, context):
-    await update.message.reply_text(
-        "📜 Commands:\n/start - Start Bot\n/help - Show help\n"
-        "/subscribe - Premium info\n/status - Check usage\n/refer <id> -Invite friends"
-    )
-
-async def subscribe(update, context):
-    await update.message.reply_text(
-        "💎 Premium Plans:\nFree: 10 links/day\nPremium: Unlimited\n📩 Contact Admin",
-        reply_markup=join_contact_buttons()
-    )
-
-async def status(update, context):
-    rec = get_user_record(update.effective_user.id)
-    limit = "Unlimited" if rec["premium"] else 10 + rec["extra_chances"]
-    await update.message.reply_text(
-        f"👤 User: {update.effective_user.id}\n💎 Premium: {'✅' if rec['premium'] else '❌'}\n"
-        f"📊 Daily: {rec['daily_count']}/{limit}\n🤝 Referrals: {rec['referrals']}"
-    )
-
-# ========================
-# LINK HANDLER
-# ========================
 async def process_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    links = list(TERABOX_LINK_RE.finditer(update.message.text or ""))
-    if not links:
+    matches = TERABOX_LINK_RE.findall(update.message.text or "")
+    if not matches:
         await update.message.reply_text("❌ No valid Terabox link found.")
         return
 
     rec = get_user_record(update.effective_user.id)
-    for m in links:
-        info = await parse_terabox_link(m.group(0))
+    for match in re.finditer(TERABOX_LINK_RE, update.message.text):
+        link = match.group(0)
+        await update.message.reply_text("⏳ Fetching link, please wait...")
+        info = await parse_terabox_link(link)
         if not info:
-            await update.message.reply_text("⚠️ Unable to fetch file details.")
+            await update.message.reply_text("⚠️ Unable to fetch file details — may be private/password protected")
             continue
-        stream = info['stream_links_premium'] if rec['premium'] else info['stream_links_normal']
+
+        streams = info['stream_links_premium'] if rec['premium'] else info['stream_links_normal']
         caption = f"🎬 <b>{info['title']}</b>\n📥 {info['direct_download']}\n\n▶ Streaming:\n"
-        for i, l in enumerate(stream):
-            caption += f"{i+1}. {l}\n"
+        for i, s in enumerate(streams):
+            caption += f"{i+1}. {s}\n"
+
         await update.message.reply_photo(info['thumbnail'], caption=caption, parse_mode="HTML", reply_markup=join_contact_buttons())
-        rec["daily_count"] += 1
+        rec['daily_count'] += 1
 
 # ========================
 # MAIN
@@ -181,9 +154,6 @@ async def process_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("subscribe", subscribe))
-    app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(TERABOX_LINK_RE), process_link))
     app.run_polling()
 
