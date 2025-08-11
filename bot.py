@@ -1,38 +1,34 @@
+from flask import Flask
+import threading
 import asyncio
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 )
 from telegram.error import BadRequest
 
-# ===== CONFIGURATION =====
-BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"   # Tera bot token
-ADMIN_ID = 5924901610                                           # Tera telegram user id (admin)
-OWNER_USERNAME = "@Thecyberfranky"                             # Tera username
-MANDATORY_CHANNELS = ["@franky_intro"]                         # Jo channel join mandatory hai
-CHANNEL_INVITE_LINK = "https://t.me/franky_intro"              # Channel invite link
+# ===== CONFIG =====
+BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"
+ADMIN_ID = 5924901610
+OWNER_USERNAME = "@Thecyberfranky"
+MANDATORY_CHANNELS = ["@franky_intro"]
+CHANNEL_INVITE_LINK = "https://t.me/franky_intro"
 
-# ===== MESSAGES =====
 WELCOME_MSG = (
     "Welcome to Terabox_byfranky_bot!\n\n"
     f"For any help, contact {OWNER_USERNAME}."
 )
 
-JOIN_CHANNEL_MSG = (
-    "You must join our channel to use this bot."
-)
+JOIN_CHANNEL_MSG = "You must join our channel to use this bot."
 
 SUBSCRIBE_MSG = (
     f"To get premium membership, please contact {OWNER_USERNAME}.\n\n"
     "Plans:\n- 1 Month\n- Lifetime"
 )
 
-# ===== USER STORAGE =====
 users_db = {}
 
 class User:
@@ -64,8 +60,6 @@ class User:
         if not self.is_premium:
             self.daily_limit += 1
 
-# ===== HELPER FUNCTIONS =====
-
 async def check_channel_membership(update: Update, user_id: int) -> bool:
     for channel in MANDATORY_CHANNELS:
         try:
@@ -77,9 +71,7 @@ async def check_channel_membership(update: Update, user_id: int) -> bool:
     return True
 
 async def send_join_channel_message(update: Update):
-    keyboard = [
-        [InlineKeyboardButton("Join Our Channel", url=CHANNEL_INVITE_LINK)]
-    ]
+    keyboard = [[InlineKeyboardButton("Join Our Channel", url=CHANNEL_INVITE_LINK)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(JOIN_CHANNEL_MSG, reply_markup=reply_markup)
 
@@ -99,40 +91,22 @@ async def auto_delete_message(message, delay_seconds=1800):
     except:
         pass
 
-# ===== Terabox scraping function =====
-
 def fetch_terabox_file_info(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code != 200:
             return None
-
         soup = BeautifulSoup(resp.text, "html.parser")
-
         title = soup.find("title").text if soup.find("title") else "Terabox File"
-
-        thumbnail = None
         meta_img = soup.find("meta", property="og:image")
-        if meta_img:
-            thumbnail = meta_img.get("content")
-
-        download_link = url  # Simplified direct link fallback
+        thumbnail = meta_img.get("content") if meta_img else None
+        download_link = url
         streaming_links = [url + f"/stream{i}" for i in range(1, 6)]  # Dummy streaming links
-
-        return {
-            "title": title,
-            "thumbnail": thumbnail,
-            "download_link": download_link,
-            "streaming_links": streaming_links
-        }
+        return {"title": title, "thumbnail": thumbnail, "download_link": download_link, "streaming_links": streaming_links}
     except Exception as e:
         print("Error fetching terabox info:", e)
         return None
-
-# ===== COMMAND HANDLERS =====
 
 @require_channel_join
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,9 +137,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_channel_join
 async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Get Subscription", url=CHANNEL_INVITE_LINK)]
-    ]
+    keyboard = [[InlineKeyboardButton("Get Subscription", url=CHANNEL_INVITE_LINK)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     sent = await update.message.reply_text(SUBSCRIBE_MSG, reply_markup=reply_markup)
     asyncio.create_task(auto_delete_message(update.message))
@@ -179,11 +151,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You are not registered. Send /start first.")
         return
     status = "Premium" if user.is_premium else "Normal"
-    text = (
-        f"Status: {status}\n"
-        f"Daily Usage: {user.used_today}/{user.daily_limit}\n"
-        f"Referrals: {user.referrals}"
-    )
+    text = f"Status: {status}\nDaily Usage: {user.used_today}/{user.daily_limit}\nReferrals: {user.referrals}"
     sent = await update.message.reply_text(text)
     asyncio.create_task(auto_delete_message(update.message))
     asyncio.create_task(auto_delete_message(sent))
@@ -323,24 +291,37 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete_message(update.message))
     asyncio.create_task(auto_delete_message(sent))
 
-# ===== MAIN =====
+# ==== Flask webserver for Render.com port binding ====
+
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Terabox_byfranky_bot is running!"
+
+def run_webserver():
+    app.run(host="0.0.0.0", port=8080)
+
+# ==== Main ====
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    threading.Thread(target=run_webserver).start()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("subscribe", subscribe_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("approve", approve_command))
-    app.add_handler(CommandHandler("remove", remove_command))
-    app.add_handler(CommandHandler("announce", announce_command))
-    app.add_handler(CommandHandler("refer", refer_command))
-    app.add_handler(MessageHandler(filters.Regex(r".*(terabox\.com|1024terabox\.com).*"), handle_terabox_link))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+    bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    print("Bot is running...")
-    app.run_polling()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("help", help_command))
+    bot_app.add_handler(CommandHandler("subscribe", subscribe_command))
+    bot_app.add_handler(CommandHandler("status", status_command))
+    bot_app.add_handler(CommandHandler("approve", approve_command))
+    bot_app.add_handler(CommandHandler("remove", remove_command))
+    bot_app.add_handler(CommandHandler("announce", announce_command))
+    bot_app.add_handler(CommandHandler("refer", refer_command))
+    bot_app.add_handler(MessageHandler(filters.Regex(r".*(terabox\.com|1024terabox\.com).*"), handle_terabox_link))
+    bot_app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    print("Bot started successfully, listening for updates...")
+    bot_app.run_polling()
 
 if __name__ == "__main__":
     main()
