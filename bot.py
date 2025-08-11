@@ -22,7 +22,7 @@ from telegram.error import BadRequest
 # ========================
 #  CONFIGURATION
 # ========================
-BOT_TOKEN = "8269947278:AAE4Jogxlstl0sEOpuY1pGnrPwy3TRrILT4"
+BOT_TOKEN = "8269947278:AAGX87RM56PTLHABH1gbniSG3ooAoe9tbUI"  # NEW TOKEN
 ADMIN_ID = 5924901610
 ADMIN_USERNAME = "Thecyberfranky"
 MANDATORY_CHANNEL = "franky_intro"
